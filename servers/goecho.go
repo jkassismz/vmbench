@@ -1,43 +1,64 @@
-// Taken from https://gist.github.com/paulsmith/775764#file-echo-go
-
 package main
 
 import (
+	"bufio"
+	"flag"
 	"fmt"
+	"io"
+	"log"
 	"net"
-	"strconv"
+	"sync"
 )
 
-const PORT = 25000
-
 func main() {
-	server, err := net.Listen("tcp", ":"+strconv.Itoa(PORT))
-	if server == nil {
-		panic("couldn't start listening: " + err.Error())
+	debug := flag.Bool("debug", false, "Verbose logging")
+	port := flag.Int("port", 25000, "TCP listen port")
+	flag.Parse()
+
+	addr := fmt.Sprintf(":%d", *port)
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatal(err)
 	}
-	i := 0
-	for {
-		client, err := server.Accept()
-		if client == nil {
-			fmt.Printf("couldn't accept: " + err.Error())
-			continue
+	log.Printf("Listening on %s", addr)
+	for i := 0; ; i++ {
+		conn, err := lis.Accept()
+		if err != nil {
+			// TODO: check if error is temporary and retry with backoff
+			log.Fatal(err)
 		}
-		i++
-		fmt.Printf("%d: %v <-> %v\n", i, client.LocalAddr(), client.RemoteAddr())
-		go handleConn(client)
+		if *debug {
+			log.Printf("%d: %v <-> %v\n", i, conn.LocalAddr(), conn.RemoteAddr())
+		}
+		go func() {
+			if err := copy(conn, conn); err != nil {
+				log.Printf("copy error: %v", err)
+			}
+			conn.Close()
+		}()
 	}
 }
 
-func handleConn(client net.Conn) {
-    defer client.Close()
-	buf := make([]byte, 102400)
-	for {
-		reqLen, err := client.Read(buf)
-		if err != nil {
-			break
-		}
-		if reqLen > 0 {
-			client.Write(buf[:reqLen])
-		}
+func copy(dst io.Writer, src io.Reader) error {
+	buf := getBufWriter(dst)
+	defer putBufWriter(buf)
+	if _, err := io.Copy(buf, src); err != nil && err != io.EOF {
+		return err
 	}
+	return buf.Flush()
+}
+
+var bufPool = sync.Pool{
+	New: func() interface{} { return bufio.NewWriter(nil) },
+}
+
+func getBufWriter(w io.Writer) *bufio.Writer {
+	bw := bufPool.Get().(*bufio.Writer)
+	bw.Reset(w)
+	return bw
+}
+
+func putBufWriter(w *bufio.Writer) {
+	w.Reset(nil)
+	bufPool.Put(w)
 }
